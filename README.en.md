@@ -116,7 +116,7 @@ docker run --detach --rm \
   --entrypoint vllm \
   vllm-sm75-v0.1.0 \
   serve Qwen/Qwen3.8-27B-FP8 \
-  --served-model-name VLLM-Qwen3.5-27B \
+  --served-model-name VLLM-Qwen3.8-27B \
   --host 0.0.0.0 \
   --port 8000 \
   --api-key "$VLLM_API_KEY" \
@@ -151,7 +151,7 @@ following the log and verify the OpenAI-compatible endpoint:
 curl http://127.0.0.1:8000/v1/chat/completions \
   --header "Authorization: Bearer $VLLM_API_KEY" \
   --header 'Content-Type: application/json' \
-  --data '{"model":"VLLM-Qwen3.5-27B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
+  --data '{"model":"VLLM-Qwen3.8-27B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
 ```
 
 These parameters reproduce the validated 4 x Tesla T10, TP4, Qwen3.8 27B FP8

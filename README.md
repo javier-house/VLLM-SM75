@@ -109,7 +109,7 @@ docker run --detach --rm \
   --entrypoint vllm \
   vllm-sm75-v0.1.0 \
   serve Qwen/Qwen3.8-27B-FP8 \
-  --served-model-name VLLM-Qwen3.5-27B \
+  --served-model-name VLLM-Qwen3.8-27B \
   --host 0.0.0.0 \
   --port 8000 \
   --api-key "$VLLM_API_KEY" \
@@ -143,7 +143,7 @@ OOM。`--shm-size 16g` 不能与 `--ipc=host` 同时使用，否则容器会重�
 curl http://127.0.0.1:8000/v1/chat/completions \
   --header "Authorization: Bearer $VLLM_API_KEY" \
   --header 'Content-Type: application/json' \
-  --data '{"model":"VLLM-Qwen3.5-27B","messages":[{"role":"user","content":"你好"}],"max_tokens":32}'
+  --data '{"model":"VLLM-Qwen3.8-27B","messages":[{"role":"user","content":"你好"}],"max_tokens":32}'
 ```
 
 以上参数对应本项目的 4 x Tesla T10、TP4、Qwen3.8 27B FP8 验证配置。更换
