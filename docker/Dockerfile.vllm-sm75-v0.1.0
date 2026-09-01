@@ -41,9 +41,18 @@ LABEL org.opencontainers.image.created="${BUILD_DATE}" \
       ai.vllm.sm75.release="${VLLM_SM75_RELEASE}"
 
 COPY vllm/envs.py /tmp/sm75-overlay/envs.py
+COPY vllm/config/model.py /tmp/sm75-overlay/config/model.py
 COPY vllm/engine/arg_utils.py /tmp/sm75-overlay/engine/arg_utils.py
+COPY vllm/entrypoints/serve/utils/api_utils.py \
+    /tmp/sm75-overlay/entrypoints/serve/utils/api_utils.py
+COPY vllm/distributed/kv_transfer/kv_connector/v1/base.py \
+    /tmp/sm75-overlay/distributed/kv_transfer/kv_connector/v1/base.py
 COPY vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py \
     /tmp/sm75-overlay/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+COPY vllm/model_executor/layers/quantization/kv_cache.py \
+    /tmp/sm75-overlay/model_executor/layers/quantization/kv_cache.py
+COPY vllm/model_executor/layers/quantization/utils/marlin_utils_fp8.py \
+    /tmp/sm75-overlay/model_executor/layers/quantization/utils/marlin_utils_fp8.py
 COPY vllm/v1/attention/backends/flashinfer.py \
     /tmp/sm75-overlay/v1/attention/backends/flashinfer.py
 COPY vllm/v1/attention/backends/gdn_attn.py \
@@ -51,19 +60,26 @@ COPY vllm/v1/attention/backends/gdn_attn.py \
 COPY vllm/third_party/flash_qla_sm75 \
     /tmp/sm75-overlay/third_party/flash_qla_sm75
 COPY docker/install_sm75_overlay.py /tmp/install_sm75_overlay.py
+COPY docker/patch_transformers_startup.py /tmp/patch_transformers_startup.py
 COPY docker/verify_sm75_image.py /tmp/verify_sm75_image.py
 RUN mkdir -p /opt/vllm-sm75/source /opt/vllm-sm75/extensions && \
+    python3 /tmp/patch_transformers_startup.py && \
     python3 /tmp/install_sm75_overlay.py /tmp/sm75-overlay \
         --source-copy /opt/vllm-sm75/source/v0.1.0/vllm && \
     cp -a /tmp/sm75-overlay/third_party/flash_qla_sm75 \
         /opt/vllm-sm75/source/ && \
-    rm -rf /tmp/sm75-overlay /tmp/install_sm75_overlay.py
+    rm -rf /tmp/sm75-overlay /tmp/install_sm75_overlay.py \
+        /tmp/patch_transformers_startup.py
 
 COPY requirements/cuda.txt /opt/vllm-sm75/source/v0.1.0/
 COPY tests/model_executor/test_sm75_gdn_selection.py \
     /opt/vllm-sm75/source/v0.1.0/tests/model_executor/test_sm75_gdn_selection.py
 COPY tests/kernels/attention/test_attention_selector.py \
     /opt/vllm-sm75/source/v0.1.0/tests/kernels/attention/test_attention_selector.py
+COPY tests/entrypoints/serve/utils/test_api_utils.py \
+    /opt/vllm-sm75/source/v0.1.0/tests/entrypoints/serve/utils/test_api_utils.py
+COPY tests/config/test_model_dtype_override.py \
+    /opt/vllm-sm75/source/v0.1.0/tests/config/test_model_dtype_override.py
 
 COPY --from=flashqla-builder /opt/flashqla-build/flash_qla_sm75_gdn.so \
     /opt/vllm-sm75/extensions/flash_qla_sm75_gdn.so
@@ -71,7 +87,9 @@ COPY --from=flashqla-builder /opt/flashqla-build/cuobjdump.txt \
     /opt/vllm-sm75/evidence/cuobjdump.txt
 
 ENV FLASH_QLA_SM75_PREBUILT_EXTENSION_PATH=/opt/vllm-sm75/extensions/flash_qla_sm75_gdn.so \
-    FLASH_QLA_SM75_ALLOW_JIT=0
+    FLASH_QLA_SM75_ALLOW_JIT=0 \
+    PYTHONWARNINGS=ignore::FutureWarning \
+    TRANSFORMERS_VERBOSITY=error
 
 RUN python3 /tmp/verify_sm75_image.py && \
     test -s /opt/vllm-sm75/extensions/flash_qla_sm75_gdn.so && \
@@ -86,6 +104,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     python3 -m pytest \
         /opt/vllm-sm75/source/v0.1.0/tests/kernels/attention/test_attention_selector.py::test_flashinfer_compute_capability_includes_sm75 \
         /opt/vllm-sm75/source/v0.1.0/tests/model_executor/test_sm75_gdn_selection.py \
+        /opt/vllm-sm75/source/v0.1.0/tests/entrypoints/serve/utils/test_api_utils.py::test_sensitive_args_are_redacted_without_mutating_input \
+        /opt/vllm-sm75/source/v0.1.0/tests/config/test_model_dtype_override.py \
         -v > /tmp/selector-pytest.log 2>&1
 
 FROM runtime AS final

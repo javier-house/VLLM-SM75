@@ -97,7 +97,8 @@ docker volume create vllm-hf-cache
 docker run --detach --rm \
   --name vllm-sm75 \
   --gpus all \
-  --ipc=host \
+  --shm-size 16g \
+  --ulimit nofile=1048576:1048576 \
   --publish 8000:8000 \
   --volume vllm-hf-cache:/root/.cache/huggingface \
   --env VLLM_GDN_DECODE_KERNEL=triton \
@@ -108,7 +109,7 @@ docker run --detach --rm \
   --entrypoint vllm \
   vllm-sm75-v0.1.0 \
   serve Qwen/Qwen3.8-27B-FP8 \
-  --served-model-name VLLM-Qwen3.8-27B \
+  --served-model-name VLLM-Qwen3.5-27B \
   --host 0.0.0.0 \
   --port 8000 \
   --api-key "$VLLM_API_KEY" \
@@ -120,6 +121,9 @@ docker run --detach --rm \
   --attention-config '{"backend":"FLASHINFER"}' \
   --gdn-prefill-backend flashqla_sm75 \
   --kv-cache-dtype fp8_e4m3 \
+  --dtype float16 \
+  --hf-overrides '{"dtype":"float16"}' \
+  --generation-config vllm \
   --enable-prefix-caching \
   --async-scheduling \
   --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
@@ -128,13 +132,18 @@ docker run --detach --rm \
 docker logs --follow vllm-sm75
 ```
 
+本次 31 GiB 系统内存验证机在启用 8 GiB CPU KV offload 时同时启用了
+16 GiB 主机 swap；内存更小且没有 swap 的主机可能在 offload 预分配阶段触发
+OOM。`--shm-size 16g` 不能与 `--ipc=host` 同时使用，否则容器会重新受宿主机
+`/dev/shm` 容量限制。
+
 日志显示服务就绪后按 `Ctrl+C` 退出日志跟踪，再验证 OpenAI 兼容接口：
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
   --header "Authorization: Bearer $VLLM_API_KEY" \
   --header 'Content-Type: application/json' \
-  --data '{"model":"VLLM-Qwen3.8-27B","messages":[{"role":"user","content":"你好"}],"max_tokens":32}'
+  --data '{"model":"VLLM-Qwen3.5-27B","messages":[{"role":"user","content":"你好"}],"max_tokens":32}'
 ```
 
 以上参数对应本项目的 4 x Tesla T10、TP4、Qwen3.8 27B FP8 验证配置。更换

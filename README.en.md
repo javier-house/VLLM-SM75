@@ -104,7 +104,8 @@ docker volume create vllm-hf-cache
 docker run --detach --rm \
   --name vllm-sm75 \
   --gpus all \
-  --ipc=host \
+  --shm-size 16g \
+  --ulimit nofile=1048576:1048576 \
   --publish 8000:8000 \
   --volume vllm-hf-cache:/root/.cache/huggingface \
   --env VLLM_GDN_DECODE_KERNEL=triton \
@@ -115,7 +116,7 @@ docker run --detach --rm \
   --entrypoint vllm \
   vllm-sm75-v0.1.0 \
   serve Qwen/Qwen3.8-27B-FP8 \
-  --served-model-name VLLM-Qwen3.8-27B \
+  --served-model-name VLLM-Qwen3.5-27B \
   --host 0.0.0.0 \
   --port 8000 \
   --api-key "$VLLM_API_KEY" \
@@ -127,6 +128,9 @@ docker run --detach --rm \
   --attention-config '{"backend":"FLASHINFER"}' \
   --gdn-prefill-backend flashqla_sm75 \
   --kv-cache-dtype fp8_e4m3 \
+  --dtype float16 \
+  --hf-overrides '{"dtype":"float16"}' \
+  --generation-config vllm \
   --enable-prefix-caching \
   --async-scheduling \
   --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
@@ -135,6 +139,11 @@ docker run --detach --rm \
 docker logs --follow vllm-sm75
 ```
 
+The 31 GiB RAM validation host also used 16 GiB of host swap with the 8 GiB
+CPU KV offload configuration. Smaller hosts without swap may be OOM-killed
+during offload preallocation. Do not combine `--shm-size 16g` with
+`--ipc=host`, because host IPC bypasses the container's private shm size.
+
 After the log reports that the service is ready, press `Ctrl+C` to stop
 following the log and verify the OpenAI-compatible endpoint:
 
@@ -142,7 +151,7 @@ following the log and verify the OpenAI-compatible endpoint:
 curl http://127.0.0.1:8000/v1/chat/completions \
   --header "Authorization: Bearer $VLLM_API_KEY" \
   --header 'Content-Type: application/json' \
-  --data '{"model":"VLLM-Qwen3.8-27B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
+  --data '{"model":"VLLM-Qwen3.5-27B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
 ```
 
 These parameters reproduce the validated 4 x Tesla T10, TP4, Qwen3.8 27B FP8

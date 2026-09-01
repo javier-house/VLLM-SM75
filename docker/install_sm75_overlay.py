@@ -20,8 +20,13 @@ def main() -> None:
     package_root = Path(vllm.__file__).resolve().parent
     files = [
         "envs.py",
+        "config/model.py",
         "engine/arg_utils.py",
+        "entrypoints/serve/utils/api_utils.py",
+        "distributed/kv_transfer/kv_connector/v1/base.py",
         "model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py",
+        "model_executor/layers/quantization/kv_cache.py",
+        "model_executor/layers/quantization/utils/marlin_utils_fp8.py",
         "v1/attention/backends/flashinfer.py",
         "v1/attention/backends/gdn_attn.py",
     ]

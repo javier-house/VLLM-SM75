@@ -13,6 +13,7 @@ EXPECTED_PACKAGES = {
     "vllm": "0.28.0",
     "flashinfer-python": "0.6.18",
     "flashinfer-cubin": "0.6.18",
+    "transformers": "5.15.1",
 }
 
 
@@ -34,6 +35,21 @@ def main() -> None:
         raise RuntimeError(f"Expected Torch 2.13.0, found {torch.__version__}")
     if torch.version.cuda != "12.9":
         raise RuntimeError(f"Expected CUDA 12.9, found {torch.version.cuda}")
+
+    from vllm.config.model import _normalize_config_dtype
+    from vllm.entrypoints.serve.utils.api_utils import _redact_sensitive_args
+
+    redacted = _redact_sensitive_args(
+        {"api_key": ["build-secret"], "hf_token": "build-token", "model": "ok"}
+    )
+    if redacted != {
+        "api_key": "<REDACTED>",
+        "hf_token": "<REDACTED>",
+        "model": "ok",
+    }:
+        raise RuntimeError(f"Sensitive argument redaction failed: {redacted}")
+    if _normalize_config_dtype("float16") is not torch.float16:
+        raise RuntimeError("String HF dtype override was not normalized")
 
     result = {
         "packages": installed,
