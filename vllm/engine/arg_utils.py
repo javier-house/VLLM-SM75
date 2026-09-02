@@ -704,6 +704,7 @@ class EngineArgs:
     auto_sleep_idle_timeout: float = 0.0
     auto_sleep_offload_target: str = "cpu"
     auto_sleep_reload_path: str | None = None
+    auto_sleep_page_cache_keep_interval: float = 600.0
     override_generation_config: dict[str, Any] = get_field(
         ModelConfig, "override_generation_config"
     )
@@ -850,14 +851,21 @@ class EngineArgs:
                 "--auto-sleep-idle-timeout must be >= 0, "
                 f"got {self.auto_sleep_idle_timeout}"
             )
-        if self.auto_sleep_offload_target not in ("cpu", "reload"):
+        if self.auto_sleep_offload_target not in ("cpu", "reload", "exit"):
             raise ValueError(
-                "--auto-sleep-offload-target must be 'cpu' or 'reload', "
-                f"got {self.auto_sleep_offload_target!r}"
+                "--auto-sleep-offload-target must be 'cpu', 'reload', or "
+                f"'exit', got {self.auto_sleep_offload_target!r}"
+            )
+        if self.auto_sleep_page_cache_keep_interval < 0:
+            raise ValueError(
+                "--auto-sleep-page-cache-keep-interval must be >= 0, "
+                f"got {self.auto_sleep_page_cache_keep_interval}"
             )
         if self.auto_sleep_idle_timeout <= 0:
             return
-        if not self.enable_sleep_mode:
+        # 'cpu'/'reload' sleep via the cumem allocator and need sleep mode;
+        # 'exit' terminates the process outright and does not.
+        if not self.enable_sleep_mode and self.auto_sleep_offload_target != "exit":
             raise ValueError(
                 "--auto-sleep-idle-timeout requires --enable-sleep-mode"
             )
@@ -865,6 +873,9 @@ class EngineArgs:
         os.environ["VLLM_AUTO_SLEEP_OFFLOAD_TARGET"] = self.auto_sleep_offload_target
         os.environ["VLLM_AUTO_SLEEP_RELOAD_PATH"] = (
             self.auto_sleep_reload_path or str(self.model)
+        )
+        os.environ["VLLM_AUTO_SLEEP_PAGE_CACHE_KEEP_INTERVAL"] = str(
+            self.auto_sleep_page_cache_keep_interval
         )
 
     @staticmethod
@@ -965,17 +976,29 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--auto-sleep-offload-target",
-            choices=["cpu", "reload"],
+            choices=["cpu", "reload", "exit"],
             default="cpu",
             help="'cpu': keep weights in pinned CPU memory (sleep level 1, "
             "fast wake); 'reload': discard weights and reload them from the "
-            "checkpoint on wake (sleep level 2, slow wake, no CPU backup).",
+            "checkpoint on wake (sleep level 2, slow wake, no CPU backup); "
+            "'exit': terminate the engine-core process entirely (deep sleep, "
+            "frees GPU memory + CUDA context + workers), respawned "
+            "transparently on the next request (cold start).",
         )
         model_group.add_argument(
             "--auto-sleep-reload-path",
             default=None,
             help="Checkpoint path used to reload weights on wake when the "
             "offload target is 'reload'. Defaults to the model path.",
+        )
+        model_group.add_argument(
+            "--auto-sleep-page-cache-keep-interval",
+            type=float,
+            default=600.0,
+            help="Seconds between page-cache re-warm ticks while the engine "
+            "sleeps in 'reload' mode; keeps the checkpoint in the OS page "
+            "cache so the wake-time reload read is fast. 0 disables the "
+            "background keeper (a one-shot warm on sleep/wake still happens).",
         )
         model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
         model_group.add_argument(

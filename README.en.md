@@ -26,10 +26,12 @@ CUDA 12.9, and TP4.
   `FULL_AND_PIECEWISE` CUDA Graph, and CPU KV offload.
 - Disables the FlashInfer sampler on SM75 while retaining FlashInfer attention;
   sampling falls back to the native vLLM implementation.
-- Adds idle auto-sleep: with `--enable-sleep-mode`, weights can be
-  automatically offloaded after an idle timeout to free GPU memory, and the
-  engine wakes automatically when the next request arrives (weights kept in
-  pinned CPU memory, or discarded and reloaded from the checkpoint).
+- Adds idle auto-sleep: after an idle timeout the engine automatically
+  offloads its weights to free GPU memory and wakes automatically on the next
+  request — keeping weights in pinned CPU memory, discarding and reloading
+  them from the checkpoint, or exiting the engine process entirely (deep
+  sleep, transparently cold-restarted on the next request). See "Idle
+  auto-sleep" below.
 
 The FlashQLA source is derived from
 [1CatAI/1Cat-vLLM](https://github.com/1CatAI/1Cat-vLLM) at commit
@@ -164,39 +166,49 @@ memory utilization when changing the GPU count, model, or available memory.
 
 ## Idle auto-sleep
 
-With `--enable-sleep-mode`, the engine automatically offloads its weights
-after a period of idleness to free GPU memory, and wakes automatically when
-a new request arrives; callers need no extra API calls. Disabled by default
+After an idle timeout the engine automatically offloads its weights to free
+GPU memory, and wakes (or rebuilds) automatically when a new request arrives;
+callers need no extra API calls. Disabled by default
 (`--auto-sleep-idle-timeout 0`); set a timeout to turn it on.
 
-Example configuration (auto-sleep after 5 idle minutes, weights discarded
-and reloaded from the on-disk checkpoint):
+Example configuration (auto-sleep after 5 idle minutes into **deep sleep**:
+the whole engine process exits — GPU memory, CUDA context, and worker
+processes all go to zero; the next request transparently cold-restarts it):
 
 ```bash
 vllm serve Qwen/Qwen3.8-27B-FP8 \
   ... \
-  --enable-sleep-mode \
   --auto-sleep-idle-timeout 5 \
-  --auto-sleep-offload-target reload
+  --auto-sleep-offload-target exit
 ```
 
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--auto-sleep-idle-timeout` | `0` (disabled) | Auto-sleep after this many idle minutes; float, e.g. `0.2` = 12 s for short test windows |
-| `--auto-sleep-offload-target` | `cpu` | `cpu`: pinned CPU backup (sleep level 1, wake ~1-2 s, ~30 GiB host RAM); `reload`: discard weights, reload from the checkpoint on wake (sleep level 2, instant on the sleep side, no backup file, no CPU memory) |
+| `--auto-sleep-offload-target` | `cpu` | `cpu`: pinned CPU backup (sleep level 1, wake ~1-2 s, ~30 GiB host RAM, needs `--enable-sleep-mode`); `reload`: discard weights, reload from the checkpoint on wake (sleep level 2, no CPU memory, wake ~20-60 s, needs `--enable-sleep-mode`); `exit`: terminate the engine-core process entirely (deep sleep — GPU memory, CUDA context, and workers all go to zero; the GPU drops to its deepest idle state; transparently cold-restarted on the next request, ~1-3 min; does **not** need `--enable-sleep-mode`) |
 | `--auto-sleep-reload-path` | startup model path | Checkpoint used to reload weights on wake in `reload` mode |
+| `--auto-sleep-page-cache-keep-interval` | `600` | In `reload` mode, re-warm the checkpoint into the OS page cache every this many seconds while sleeping, so the wake-time disk read hits the cache instead of cold NVMe; `0` disables the background warm (a one-shot warm on sleep/wake still happens). In `exit` mode the checkpoint is warmed once just before exit so the cold start reads from cache |
 
 Notes:
 
 - Wake time is paid by the first request after idleness: `reload` mode reads
-  the checkpoint from disk and re-runs the quantization repack (measured
-  wake time for the 27B FP8 model will be documented here); `cpu` mode takes
-  ~1-2 s.
+  the checkpoint from disk and re-runs the quantization repack (~20-60 s);
+  `cpu` mode takes ~1-2 s; `exit` mode is a full cold start (process +
+  model load + quantization repack, ~1-3 min) in exchange for the GPU being
+  completely idle while asleep.
+- `exit` mode (deep sleep) terminates the engine process — the most thorough
+  power saving — at the cost of the slowest wake. It suits long idle periods
+  (e.g. overnight). Currently supported only for the single-API-server,
+  DP=1 topology.
 - `reload` mode requires the model checkpoint to stay readable on disk (the
   `vllm-hf-cache` volume must remain mounted).
-- On hosts with limited CPU RAM (e.g. the 31 GiB validation host),
-  `reload` is recommended; `cpu` mode needs ~30 GiB of extra pinned CPU
-  memory.
+- `reload` mode warms the checkpoint into the OS page cache by default while
+  sleeping (every 600 s; tune or disable with
+  `--auto-sleep-page-cache-keep-interval`). This lets the wake-time
+  `reload_weights` read hit the cache instead of cold NVMe, cutting wake time
+  by roughly 10-25 s on NVMe; it is a no-op for pages already resident.
+- On hosts with limited CPU RAM (e.g. the 31 GiB validation host), prefer
+  `reload` or `exit`; `cpu` mode needs ~30 GiB of extra pinned CPU memory.
 - With a speculative decoding drafter, prefer `cpu` mode (drafter weights
   are not reloaded together with the main model).
 - Manual `POST /sleep` / `POST /wake_up` / `GET /is_sleeping` live on the

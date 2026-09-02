@@ -61,6 +61,10 @@ COPY vllm/v1/engine/auto_sleep.py \
     /tmp/sm75-overlay/v1/engine/auto_sleep.py
 COPY vllm/v1/engine/core.py \
     /tmp/sm75-overlay/v1/engine/core.py
+COPY vllm/v1/engine/async_llm.py \
+    /tmp/sm75-overlay/v1/engine/async_llm.py
+COPY vllm/v1/engine/core_client.py \
+    /tmp/sm75-overlay/v1/engine/core_client.py
 COPY vllm/third_party/flash_qla_sm75 \
     /tmp/sm75-overlay/third_party/flash_qla_sm75
 COPY docker/install_sm75_overlay.py /tmp/install_sm75_overlay.py

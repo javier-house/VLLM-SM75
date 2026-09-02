@@ -12,6 +12,7 @@ import importlib.util
 import os
 import queue
 import sys
+import tempfile
 import time
 import traceback
 from contextlib import contextmanager
@@ -95,6 +96,10 @@ class _FakeEngine:
         self.wake_up_calls = 0
         self.rpc_calls: list[tuple[str, dict | None]] = []
         self.wake_up_error: Exception | None = None
+        # Count of request_deep_sleep_exit() calls.  The method itself only
+        # exists on EngineCoreProc; tests attach it via _enable_deep_sleep_exit
+        # so the controller's getattr fallback can be exercised too.
+        self.deep_sleep_exit_calls = 0
 
     def is_sleeping(self) -> bool:
         return self.sleeping
@@ -119,11 +124,13 @@ def _make_controller(
     timeout_seconds: float = 0.05,
     offload_target: str = "cpu",
     reload_path: str = "",
+    page_cache_keep_interval_seconds: float = 600.0,
 ) -> Any:
     config = auto_sleep_mod.AutoSleepConfig(
         timeout_seconds=timeout_seconds,
         offload_target=offload_target,
         reload_path=reload_path,
+        page_cache_keep_interval_seconds=page_cache_keep_interval_seconds,
     )
     return auto_sleep_mod.AutoSleepController(fake, b"\x05", config=config)
 
@@ -141,6 +148,15 @@ def _drain_wakeup(fake: _FakeEngine, controller: Any, timeout: float = 3.0) -> N
             controller.on_wakeup_poke()
             return
     raise AssertionError("WAKEUP sentinel was not enqueued by the timer")
+
+
+def _enable_deep_sleep_exit(fake: _FakeEngine) -> None:
+    """Attach request_deep_sleep_exit (present only on EngineCoreProc)."""
+
+    def _request_deep_sleep_exit() -> None:
+        fake.deep_sleep_exit_calls += 1
+
+    fake.request_deep_sleep_exit = _request_deep_sleep_exit
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +236,22 @@ def test_config_from_env_invalid_values():
             assert "OFFLOAD_TARGET" in str(exc)
         else:
             raise AssertionError("expected ValueError for unknown target")
+
+
+def test_config_from_env_exit_target():
+    # "exit" deep sleep does not require a reload path (it re-runs the full
+    # startup load from the model path on respawn).
+    with _env(
+        {
+            auto_sleep.IDLE_TIMEOUT_ENV: "1",
+            auto_sleep.OFFLOAD_TARGET_ENV: "exit",
+            auto_sleep.RELOAD_PATH_ENV: None,
+        }
+    ):
+        config = auto_sleep.AutoSleepConfig.from_env()
+    assert config is not None
+    assert config.offload_target == "exit"
+    assert config.is_exit
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +406,186 @@ def test_no_sleep_during_shutdown():
 
 
 # ---------------------------------------------------------------------------
+# Page-cache warming
+# ---------------------------------------------------------------------------
+
+
+def test_warm_page_cache_nonexistent_path():
+    assert auto_sleep.warm_safetensors_page_cache("/nonexistent/model") == 0
+    assert auto_sleep.warm_safetensors_page_cache("") == 0
+
+
+def test_warm_page_cache_empty_dir():
+    with tempfile.TemporaryDirectory() as tmp:
+        assert auto_sleep.warm_safetensors_page_cache(tmp) == 0
+
+
+def test_warm_page_cache_counts_safetensors_only():
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "model-00001.safetensors").write_bytes(b"x" * 100)
+        (Path(tmp) / "model-00002.safetensors").write_bytes(b"y" * 200)
+        (Path(tmp) / "config.json").write_text("{}")
+        (Path(tmp) / "weights.bin").write_bytes(b"z" * 50)
+        # nested shards are not scanned (top-level glob only)
+        nested = Path(tmp) / "shards"
+        nested.mkdir()
+        (nested / "model-00003.safetensors").write_bytes(b"w" * 10)
+        assert auto_sleep.warm_safetensors_page_cache(tmp) == 2
+
+
+def test_warm_page_cache_single_file():
+    with tempfile.TemporaryDirectory() as tmp:
+        shard = Path(tmp) / "model.safetensors"
+        shard.write_bytes(b"x" * 100)
+        assert auto_sleep.warm_safetensors_page_cache(str(shard)) == 1
+        other = Path(tmp) / "weights.bin"
+        other.write_bytes(b"z" * 100)
+        assert auto_sleep.warm_safetensors_page_cache(str(other)) == 0
+
+
+def test_config_page_cache_interval_default():
+    with _env(
+        {
+            auto_sleep.IDLE_TIMEOUT_ENV: "1",
+            auto_sleep.OFFLOAD_TARGET_ENV: "reload",
+            auto_sleep.RELOAD_PATH_ENV: "/ckpt",
+            auto_sleep.PAGE_CACHE_KEEP_INTERVAL_ENV: None,
+        }
+    ):
+        config = auto_sleep.AutoSleepConfig.from_env()
+    assert config is not None
+    assert config.page_cache_keep_interval_seconds == 600.0
+
+
+def test_config_page_cache_interval_explicit():
+    with _env(
+        {
+            auto_sleep.IDLE_TIMEOUT_ENV: "1",
+            auto_sleep.OFFLOAD_TARGET_ENV: "reload",
+            auto_sleep.RELOAD_PATH_ENV: "/ckpt",
+            auto_sleep.PAGE_CACHE_KEEP_INTERVAL_ENV: "30",
+        }
+    ):
+        config = auto_sleep.AutoSleepConfig.from_env()
+    assert config is not None
+    assert config.page_cache_keep_interval_seconds == 30.0
+
+
+def test_config_page_cache_interval_invalid_falls_back_to_default():
+    for bad in ("not-a-number", "-5"):
+        with _env(
+            {
+                auto_sleep.IDLE_TIMEOUT_ENV: "1",
+                auto_sleep.OFFLOAD_TARGET_ENV: "reload",
+                auto_sleep.RELOAD_PATH_ENV: "/ckpt",
+                auto_sleep.PAGE_CACHE_KEEP_INTERVAL_ENV: bad,
+            }
+        ):
+            config = auto_sleep.AutoSleepConfig.from_env()
+        assert config is not None, "bad interval must not disable auto-sleep"
+        assert config.page_cache_keep_interval_seconds == 600.0
+
+
+def test_reload_sleep_arms_page_cache_keeper():
+    fake = _FakeEngine()
+    controller = _make_controller(
+        fake, auto_sleep, timeout_seconds=0.05, offload_target="reload",
+        reload_path="/ckpt",
+    )
+    controller.on_idle(fake)
+    _drain_wakeup(fake, controller)
+    assert fake.sleep_calls == [2]
+    try:
+        assert controller._keeper is not None, "reload sleep must arm the keeper"
+        assert controller._keeper.is_running()
+    finally:
+        controller._stop_keeper()
+    assert controller._keeper is None
+
+
+def test_cpu_sleep_does_not_arm_keeper():
+    fake = _FakeEngine()
+    controller = _make_controller(fake, auto_sleep, timeout_seconds=0.05)
+    controller.on_idle(fake)
+    _drain_wakeup(fake, controller)
+    assert fake.sleep_calls == [1]
+    assert controller._keeper is None, "cpu target keeps no page-cache keeper"
+
+
+def test_reload_interval_zero_disables_keeper():
+    fake = _FakeEngine()
+    controller = _make_controller(
+        fake, auto_sleep, timeout_seconds=0.05, offload_target="reload",
+        reload_path="/ckpt", page_cache_keep_interval_seconds=0.0,
+    )
+    controller.on_idle(fake)
+    _drain_wakeup(fake, controller)
+    assert fake.sleep_calls == [2]
+    assert controller._keeper is None, "interval 0 disables the background keeper"
+
+
+def test_wake_stops_page_cache_keeper():
+    fake = _FakeEngine()
+    controller = _make_controller(
+        fake, auto_sleep, timeout_seconds=0.05, offload_target="reload",
+        reload_path="/ckpt",
+    )
+    controller.on_idle(fake)
+    _drain_wakeup(fake, controller)
+    assert controller._keeper is not None
+    controller.on_request_arrival()  # triggers _wake()
+    assert fake.sleeping is False
+    assert controller._keeper is None, "wake must stop the keeper"
+    assert controller.state is auto_sleep.AutoSleepState.ACTIVE
+
+
+def test_request_on_awake_engine_stops_lingering_keeper():
+    fake = _FakeEngine()
+    controller = _make_controller(
+        fake, auto_sleep, timeout_seconds=0.05, offload_target="reload",
+        reload_path="/ckpt",
+    )
+    controller.on_idle(fake)
+    _drain_wakeup(fake, controller)
+    assert controller._keeper is not None
+    # Simulate a manual wake via the dev endpoint: the engine is awake but
+    # the controller (and its keeper) are unaware of it.
+    fake.sleeping = False
+    controller.on_request_arrival()
+    assert controller._keeper is None, (
+        "a request on an already-awake engine must stop the lingering keeper"
+    )
+
+
+def test_exit_mode_requests_deep_sleep_exit():
+    fake = _FakeEngine()
+    _enable_deep_sleep_exit(fake)
+    controller = _make_controller(
+        fake, auto_sleep, timeout_seconds=0.05, offload_target="exit",
+        reload_path="/ckpt",
+    )
+    controller.on_idle(fake)
+    _drain_wakeup(fake, controller)
+    assert fake.sleep_calls == [], "exit mode must not call engine.sleep()"
+    assert fake.deep_sleep_exit_calls == 1
+    assert controller.state is auto_sleep.AutoSleepState.EXITED
+
+
+def test_exit_mode_unsupported_engine_stays_active():
+    # No request_deep_sleep_exit attached: the in-process EngineCore base
+    # class has no exit path, so the controller must stay active (and log an
+    # error) rather than wedging the engine.
+    fake = _FakeEngine()
+    controller = _make_controller(
+        fake, auto_sleep, timeout_seconds=0.05, offload_target="exit",
+    )
+    controller.on_idle(fake)
+    _drain_wakeup(fake, controller)
+    assert fake.deep_sleep_exit_calls == 0
+    assert controller.state is auto_sleep.AutoSleepState.ACTIVE
+
+
+# ---------------------------------------------------------------------------
 # CLI arg validation (needs the full vllm package; image-only)
 # ---------------------------------------------------------------------------
 
@@ -390,6 +602,7 @@ def test_cli_arg_validation_and_env_propagation():
             auto_sleep.IDLE_TIMEOUT_ENV: None,
             auto_sleep.OFFLOAD_TARGET_ENV: None,
             auto_sleep.RELOAD_PATH_ENV: None,
+            auto_sleep.PAGE_CACHE_KEEP_INTERVAL_ENV: None,
         }
     ):
         # timeout without --enable-sleep-mode must be rejected
@@ -402,16 +615,31 @@ def test_cli_arg_validation_and_env_propagation():
         else:
             raise AssertionError("expected ValueError without --enable-sleep-mode")
 
+        # negative page-cache keep interval must be rejected
+        try:
+            arg_utils.EngineArgs(
+                model="/m",
+                auto_sleep_idle_timeout=1.0,
+                auto_sleep_page_cache_keep_interval=-1.0,
+                enable_sleep_mode=True,
+            )
+        except ValueError as exc:
+            assert "page-cache-keep-interval" in str(exc)
+        else:
+            raise AssertionError("expected ValueError for negative keep interval")
+
         # explicit values propagate to the envs for the engine-core subprocess
         arg_utils.EngineArgs(
             model="/m",
             auto_sleep_idle_timeout=2.5,
             auto_sleep_offload_target="reload",
+            auto_sleep_page_cache_keep_interval=30.0,
             enable_sleep_mode=True,
         )
         assert os.environ[auto_sleep.IDLE_TIMEOUT_ENV] == "2.5"
         assert os.environ[auto_sleep.OFFLOAD_TARGET_ENV] == "reload"
         assert os.environ[auto_sleep.RELOAD_PATH_ENV] == "/m"
+        assert os.environ[auto_sleep.PAGE_CACHE_KEEP_INTERVAL_ENV] == "30.0"
 
         # explicit reload path wins over the model path
         arg_utils.EngineArgs(
@@ -423,10 +651,25 @@ def test_cli_arg_validation_and_env_propagation():
         )
         assert os.environ[auto_sleep.RELOAD_PATH_ENV] == "/other"
 
-        # disabled by default: no env side effects
-        os.environ.pop(auto_sleep.IDLE_TIMEOUT_ENV, None)
+        # disabled by default: no env side effects.  Clear what the cases
+        # above set, then verify a fresh EngineArgs (timeout=0) adds nothing
+        # back — otherwise the "not in os.environ" check is contaminated by
+        # the earlier propagation assertions.
+        for key in (
+            auto_sleep.IDLE_TIMEOUT_ENV,
+            auto_sleep.OFFLOAD_TARGET_ENV,
+            auto_sleep.RELOAD_PATH_ENV,
+            auto_sleep.PAGE_CACHE_KEEP_INTERVAL_ENV,
+        ):
+            os.environ.pop(key, None)
         arg_utils.EngineArgs(model="/m", enable_sleep_mode=True)
-        assert auto_sleep.IDLE_TIMEOUT_ENV not in os.environ
+        for key in (
+            auto_sleep.IDLE_TIMEOUT_ENV,
+            auto_sleep.OFFLOAD_TARGET_ENV,
+            auto_sleep.RELOAD_PATH_ENV,
+            auto_sleep.PAGE_CACHE_KEEP_INTERVAL_ENV,
+        ):
+            assert key not in os.environ
 
 
 if __name__ == "__main__":

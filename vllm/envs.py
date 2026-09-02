@@ -2149,6 +2149,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Checkpoint path used to reload weights on wake for the 'reload' target.
     "VLLM_AUTO_SLEEP_RELOAD_PATH": lambda: os.getenv("VLLM_AUTO_SLEEP_RELOAD_PATH", ""),
+    # Seconds between page-cache re-warm ticks while sleeping (reload mode);
+    # keeps the checkpoint in the OS page cache so the wake-time reload read
+    # is fast. 0 disables the background keeper (one-shot warm on sleep/wake
+    # still happens).
+    "VLLM_AUTO_SLEEP_PAGE_CACHE_KEEP_INTERVAL": lambda: float(
+        os.getenv("VLLM_AUTO_SLEEP_PAGE_CACHE_KEEP_INTERVAL", "600")
+    ),
 }
 
 

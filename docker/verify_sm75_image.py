@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import tempfile
 from pathlib import Path
 
 import torch
@@ -66,6 +67,39 @@ def main() -> None:
         raise RuntimeError(
             "auto-sleep must be disabled without VLLM_AUTO_SLEEP_* envs"
         )
+    from vllm.v1.engine.auto_sleep import warm_safetensors_page_cache
+
+    if (
+        AutoSleepConfig(timeout_seconds=60.0).page_cache_keep_interval_seconds
+        != 600.0
+    ):
+        raise RuntimeError("auto-sleep page-cache keeper default must be 600s")
+    if not AutoSleepConfig(timeout_seconds=60.0, offload_target="exit").is_exit:
+        raise RuntimeError("auto-sleep must recognize the 'exit' offload target")
+    with tempfile.TemporaryDirectory() as tmp:
+        if warm_safetensors_page_cache(tmp) != 0:
+            raise RuntimeError(
+                "page-cache warm on an empty dir must advise 0 files"
+            )
+
+    # Deep-sleep exit plumbing on the engine-core proc.
+    from vllm.v1.engine.core import EngineCoreProc
+
+    if EngineCoreProc.DEEP_SLEEP_EXITING != b"DEEP_SLEEP_EXITING":
+        raise RuntimeError("EngineCoreProc must define DEEP_SLEEP_EXITING")
+    if not hasattr(EngineCoreProc, "request_deep_sleep_exit"):
+        raise RuntimeError("EngineCoreProc must define request_deep_sleep_exit")
+
+    # Deep-sleep respawn plumbing on the client side.
+    from vllm.v1.engine.async_llm import AsyncLLM
+    from vllm.v1.engine.core_client import AsyncMPClient, MPClient
+
+    if not hasattr(MPClient, "_respawn_launch"):
+        raise RuntimeError("MPClient must define _respawn_launch")
+    if not hasattr(AsyncMPClient, "respawn_engine"):
+        raise RuntimeError("AsyncMPClient must define respawn_engine")
+    if not hasattr(AsyncLLM, "_await_deep_sleep_respawn"):
+        raise RuntimeError("AsyncLLM must define _await_deep_sleep_respawn")
 
     result = {
         "packages": installed,

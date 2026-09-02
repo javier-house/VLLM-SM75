@@ -1019,6 +1019,11 @@ class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
+    # vllm-sm75 overlay: deep-sleep exit sentinel. Sent on the output socket
+    # immediately before an intentional auto-sleep process exit, so the client
+    # can tell it apart from a crash and respawn the engine on the next
+    # request instead of treating it as fatal.
+    DEEP_SLEEP_EXITING = b"DEEP_SLEEP_EXITING"
     addresses: EngineZmqAddresses
 
     @instrument(span_name="EngineCoreProc init")
@@ -1626,6 +1631,37 @@ class EngineCoreProc(EngineCore):
                 "to send. Please report this issue."
             )
 
+    # vllm-sm75 overlay: deep-sleep exit (auto-sleep offload-target "exit").
+    def _send_deep_sleep_exiting(self):
+        """Notify the client that this process is exiting intentionally for
+        deep sleep, so it respawns the engine on the next request instead of
+        treating the exit as a crash."""
+        self.output_queue.put_nowait(EngineCoreProc.DEEP_SLEEP_EXITING)
+        # Ensure the sentinel is flushed before shutdown, mirroring
+        # _send_engine_dead.
+        self.output_thread.join(timeout=5.0)
+        if self.output_thread.is_alive():
+            logger.warning(
+                "[deep-sleep] EngineCore: DEEP_SLEEP_EXITING was not flushed "
+                "in time; the client may treat this exit as a crash."
+            )
+
+    def request_deep_sleep_exit(self) -> None:
+        """Intentionally terminate this EngineCore process to free all GPU
+        memory (weights, CUDA context, worker processes).
+
+        Called by the auto-sleep controller on the main loop thread once the
+        engine has been idle past its timeout.  Notifies the client first,
+        then requests a normal shutdown so run_busy_loop unwinds and the
+        finally block tears down the executor.  The process exits with code 0.
+        """
+        logger.info(
+            "[deep-sleep] EngineCore: idle timeout reached; exiting process. "
+            "The client will respawn the engine on the next request."
+        )
+        self._send_deep_sleep_exiting()
+        self.shutdown_state = EngineShutdownState.REQUESTED
+
     def _make_ready_response(self) -> EngineCoreReadyResponse:
         parallel_config = self.vllm_config.parallel_config
         scheduler_config = self.vllm_config.scheduler_config
@@ -1801,7 +1837,12 @@ class EngineCoreProc(EngineCore):
 
             while True:
                 output = self.output_queue.get()
-                if output == EngineCoreProc.ENGINE_CORE_DEAD:
+                # vllm-sm75 overlay: DEEP_SLEEP_EXITING rides the same
+                # send-and-stop channel as ENGINE_CORE_DEAD.
+                if output in (
+                    EngineCoreProc.ENGINE_CORE_DEAD,
+                    EngineCoreProc.DEEP_SLEEP_EXITING,
+                ):
                     for socket in sockets:
                         socket.send(output)
                     break
