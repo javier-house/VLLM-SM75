@@ -29,6 +29,8 @@ def main() -> None:
         "model_executor/layers/quantization/utils/marlin_utils_fp8.py",
         "v1/attention/backends/flashinfer.py",
         "v1/attention/backends/gdn_attn.py",
+        "v1/engine/auto_sleep.py",
+        "v1/engine/core.py",
     ]
     for relative in files:
         source = source_root / relative

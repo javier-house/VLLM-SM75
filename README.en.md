@@ -26,6 +26,10 @@ CUDA 12.9, and TP4.
   `FULL_AND_PIECEWISE` CUDA Graph, and CPU KV offload.
 - Disables the FlashInfer sampler on SM75 while retaining FlashInfer attention;
   sampling falls back to the native vLLM implementation.
+- Adds idle auto-sleep: with `--enable-sleep-mode`, weights can be
+  automatically offloaded after an idle timeout to free GPU memory, and the
+  engine wakes automatically when the next request arrives (weights kept in
+  pinned CPU memory, or discarded and reloaded from the checkpoint).
 
 The FlashQLA source is derived from
 [1CatAI/1Cat-vLLM](https://github.com/1CatAI/1Cat-vLLM) at commit
@@ -157,6 +161,46 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 These parameters reproduce the validated 4 x Tesla T10, TP4, Qwen3.8 27B FP8
 configuration. Adjust tensor parallelism, model length, concurrency, and GPU
 memory utilization when changing the GPU count, model, or available memory.
+
+## Idle auto-sleep
+
+With `--enable-sleep-mode`, the engine automatically offloads its weights
+after a period of idleness to free GPU memory, and wakes automatically when
+a new request arrives; callers need no extra API calls. Disabled by default
+(`--auto-sleep-idle-timeout 0`); set a timeout to turn it on.
+
+Example configuration (auto-sleep after 5 idle minutes, weights discarded
+and reloaded from the on-disk checkpoint):
+
+```bash
+vllm serve Qwen/Qwen3.8-27B-FP8 \
+  ... \
+  --enable-sleep-mode \
+  --auto-sleep-idle-timeout 5 \
+  --auto-sleep-offload-target reload
+```
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--auto-sleep-idle-timeout` | `0` (disabled) | Auto-sleep after this many idle minutes; float, e.g. `0.2` = 12 s for short test windows |
+| `--auto-sleep-offload-target` | `cpu` | `cpu`: pinned CPU backup (sleep level 1, wake ~1-2 s, ~30 GiB host RAM); `reload`: discard weights, reload from the checkpoint on wake (sleep level 2, instant on the sleep side, no backup file, no CPU memory) |
+| `--auto-sleep-reload-path` | startup model path | Checkpoint used to reload weights on wake in `reload` mode |
+
+Notes:
+
+- Wake time is paid by the first request after idleness: `reload` mode reads
+  the checkpoint from disk and re-runs the quantization repack (measured
+  wake time for the 27B FP8 model will be documented here); `cpu` mode takes
+  ~1-2 s.
+- `reload` mode requires the model checkpoint to stay readable on disk (the
+  `vllm-hf-cache` volume must remain mounted).
+- On hosts with limited CPU RAM (e.g. the 31 GiB validation host),
+  `reload` is recommended; `cpu` mode needs ~30 GiB of extra pinned CPU
+  memory.
+- With a speculative decoding drafter, prefer `cpu` mode (drafter weights
+  are not reloaded together with the main model).
+- Manual `POST /sleep` / `POST /wake_up` / `GET /is_sleeping` live on the
+  dev endpoints; mixing them with auto mode is undefined.
 
 ## License
 

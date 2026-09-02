@@ -51,6 +51,22 @@ def main() -> None:
     if _normalize_config_dtype("float16") is not torch.float16:
         raise RuntimeError("String HF dtype override was not normalized")
 
+    from vllm.v1.engine.auto_sleep import AutoSleepConfig, AutoSleepController
+
+    if AutoSleepConfig(timeout_seconds=60.0).sleep_level != 1:
+        raise RuntimeError("auto-sleep 'cpu' target must map to sleep level 1")
+    if (
+        AutoSleepConfig(
+            timeout_seconds=60.0, offload_target="reload", reload_path="/ckpt"
+        ).sleep_level
+        != 2
+    ):
+        raise RuntimeError("auto-sleep 'reload' target must map to sleep level 2")
+    if AutoSleepController(object(), object()).enabled:
+        raise RuntimeError(
+            "auto-sleep must be disabled without VLLM_AUTO_SLEEP_* envs"
+        )
+
     result = {
         "packages": installed,
         "flashinfer_jit_cache": "absent",

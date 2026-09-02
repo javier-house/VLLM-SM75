@@ -23,6 +23,9 @@
   `FULL_AND_PIECEWISE` CUDA Graph 和 CPU KV offload。
 - FlashInfer sampler 在 SM75 上关闭，attention 仍使用 FlashInfer，sampling
   回退到 vLLM 原生实现。
+- 新增空闲自动睡眠（auto-sleep）：配合 `--enable-sleep-mode` 使用时，
+  空闲超时后自动卸载权重释放显存，新请求到达自动唤醒（权重可备份到
+  CPU 内存，或丢弃后从 checkpoint 重载），调用方无需任何额外接口。
 
 FlashQLA 源码来自
 [1CatAI/1Cat-vLLM](https://github.com/1CatAI/1Cat-vLLM)，固定提交
@@ -148,6 +151,42 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 以上参数对应本项目的 4 x Tesla T10、TP4、Qwen3.8 27B FP8 验证配置。更换
 GPU 数量、模型或可用显存后，再相应调整 TP、模型长度、并发和显存利用率。
+
+## 空闲自动睡眠（auto-sleep）
+
+配合 `--enable-sleep-mode` 使用时，引擎空闲超过设定时间会自动卸载权重、
+释放 GPU 显存；新请求到达时自动唤醒并继续服务，调用方无需任何额外调用。
+默认关闭（`--auto-sleep-idle-timeout 0`），显式传入超时时开启。
+
+示例配置（空闲 5 分钟自动睡眠，权重丢弃后从磁盘 checkpoint 重载）：
+
+```bash
+vllm serve Qwen/Qwen3.8-27B-FP8 \
+  ... \
+  --enable-sleep-mode \
+  --auto-sleep-idle-timeout 5 \
+  --auto-sleep-offload-target reload
+```
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--auto-sleep-idle-timeout` | `0`（关闭） | 空闲超过该分钟数触发自动睡眠；float，如 `0.2` = 12 秒（短窗口测试用） |
+| `--auto-sleep-offload-target` | `cpu` | `cpu` = 权重备份到 CPU 内存（sleep level 1，唤醒约 1-2s，占约 30 GiB 主机内存）；`reload` = 权重直接丢弃、唤醒时从 checkpoint 重载（sleep level 2，睡眠侧瞬间完成，不写备份文件、不占 CPU 内存） |
+| `--auto-sleep-reload-path` | 启动时的模型路径 | `reload` 模式唤醒使用的 checkpoint 路径 |
+
+注意事项：
+
+- 唤醒耗时计入空闲后第一个请求的 TTFT：`reload` 模式需要从磁盘读
+  checkpoint 并重跑量化 repack（27B FP8 模型的实测值验证后补充到此处）；
+  `cpu` 模式约 1-2 秒。
+- `reload` 模式要求模型 checkpoint 在磁盘上持续可读（即
+  `vllm-hf-cache` 卷保持挂载）。
+- CPU 内存有限的主机（如 31 GiB 验证机）推荐 `reload`；`cpu` 模式需要
+  额外约 30 GiB 主机内存存放 pinned 备份。
+- 启用投机解码 drafter 时推荐 `cpu` 模式（drafter 权重不随主模型
+  自动重载）。
+- 手动 `POST /sleep` / `POST /wake_up` / `GET /is_sleeping` 位于 dev
+  路由；auto 模式下手动调用的行为未定义。
 
 ## License
 
