@@ -114,8 +114,11 @@ RUN python3 /tmp/verify_sm75_image.py && \
 
 FROM runtime AS selector-tests
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system pytest==9.1.0 && \
+# No --mount=type=cache here: it is a BuildKit-only feature and aborts on
+# hosts running the legacy builder ("the --mount option requires BuildKit").
+# The uv cache it provided only speeds up a single small pytest install, so
+# dropping it keeps this Dockerfile buildable under both builders.
+RUN uv pip install --system pytest==9.1.0 && \
     python3 -m pytest \
         /opt/vllm-sm75/source/v0.1.0/tests/kernels/attention/test_attention_selector.py::test_flashinfer_compute_capability_includes_sm75 \
         /opt/vllm-sm75/source/v0.1.0/tests/model_executor/test_sm75_gdn_selection.py \
