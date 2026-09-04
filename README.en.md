@@ -79,36 +79,13 @@ git clone https://github.com/fishensw/VLLM-SM75.git
 cd VLLM-SM75
 ```
 
-### 2. Prepare the base image
+### 2. Build the image
 
-The build expects a custom SM75 base image: vLLM 0.28.0, CUDA 12.9,
-PyTorch 2.13.0, with FlashInfer upgraded from the official baseline
-0.6.16.post3 to 0.6.18 and `flashinfer-jit-cache` removed (the build-time
-contract check verifies these versions; building directly on the official
-image fails at the verify step). Skip this section if you already have a
-built `-sm75` base image; otherwise start from the official
-`vllm/vllm-openai:v0.28.0-cu129` image:
-
-```dockerfile
-# Dockerfile.sm75-base
-FROM vllm/vllm-openai:v0.28.0-cu129
-
-RUN uv pip install --system --no-cache \
-      --extra-index-url https://flashinfer.ai/whl/ \
-      "flashinfer-python==0.6.18" "flashinfer-cubin==0.6.18" \
-    && (uv pip uninstall --system flashinfer-jit-cache || true)
-```
+Prepare a base image compatible with vLLM 0.28.0, CUDA 12.9, PyTorch 2.13.0,
+and SM75:
 
 ```bash
-mkdir -p /tmp/sm75-base
-# Save the Dockerfile.sm75-base above as /tmp/sm75-base/Dockerfile
-docker build -t local/vllm-openai:v0.28.0-cu129-sm75 /tmp/sm75-base
-```
-
-### 3. Build the image
-
-```bash
-export BASE_IMAGE='local/vllm-openai:v0.28.0-cu129-sm75'
+export BASE_IMAGE='your-registry.example/vllm-openai:v0.28.0-cu129-sm75'
 
 docker build \
   --file docker/Dockerfile.vllm-sm75-v0.1.0 \
@@ -124,7 +101,7 @@ The Dockerfile compiles the SM75 extension, validates the target architecture
 with `cuobjdump`, verifies runtime versions, and runs the required backend
 selector tests during the build.
 
-### 4. Start the service
+### 3. Start the service
 
 ```bash
 export VLLM_API_KEY='replace-with-your-api-key'
