@@ -1465,8 +1465,13 @@ class EngineCoreProc(EngineCore):
         return model_executed
 
     def _notify_idle_state_callbacks(self) -> None:
-        while self._idle_state_callbacks:
-            callback = self._idle_state_callbacks.pop()
+        # Snapshot before invoking: a callback may re-register itself
+        # during the call (the auto-sleep controller does, to stay
+        # subscribed across idle periods).  Popping the live list would
+        # spin forever on such a callback; the snapshot defers any
+        # re-registration to the next idle notification.
+        callbacks, self._idle_state_callbacks = self._idle_state_callbacks, []
+        for callback in callbacks:
             callback(self)
 
     def _handle_shutdown(self) -> bool:

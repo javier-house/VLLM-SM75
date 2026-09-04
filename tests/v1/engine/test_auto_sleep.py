@@ -13,6 +13,7 @@ import os
 import queue
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from contextlib import contextmanager
@@ -292,6 +293,59 @@ def test_idle_arms_timer_and_wakeup_poke_sleeps():
     assert fake.sleep_calls == [1], "cpu target must sleep at level 1"
     assert controller.state is auto_sleep.AutoSleepState.SLEEPING
     assert fake.sleeping
+
+
+def test_notify_idle_callbacks_terminates_with_reregistering_callback():
+    """Regression: a callback that re-registers itself during notification
+    must not spin EngineCore._notify_idle_state_callbacks forever.
+
+    AutoSleepController.on_idle re-appends itself to
+    engine._idle_state_callbacks on every invocation (to stay subscribed
+    across idle periods).  The previous implementation popped the live list
+    inside a ``while self._idle_state_callbacks:`` loop, so the
+    re-registration kept the list non-empty and the loop never terminated:
+    the engine sat idle with one CPU core pegged and the API server never
+    became ready.  The snapshot-based implementation must return after one
+    pass and defer the re-registration to the next idle notification.
+    """
+    try:
+        from vllm.v1.engine.core import EngineCore
+    except ImportError:
+        print("  skipped: vllm not importable in this environment")
+        return
+
+    notify = EngineCore._notify_idle_state_callbacks  # plain function
+
+    class _Stub:
+        def __init__(self) -> None:
+            self._idle_state_callbacks: list = []
+
+    stub = _Stub()
+    calls = 0
+
+    def reregistering(core) -> None:
+        nonlocal calls
+        calls += 1
+        core._idle_state_callbacks.append(reregistering)
+
+    stub._idle_state_callbacks.append(reregistering)
+
+    # Run in a worker thread so a regression (infinite loop) fails fast
+    # instead of hanging the whole test run.
+    done = []
+    worker = threading.Thread(
+        target=lambda: (notify(stub), done.append(1)), daemon=True
+    )
+    worker.start()
+    worker.join(timeout=5.0)
+    assert not worker.is_alive(), (
+        "_notify_idle_state_callbacks hung on a re-registering callback"
+    )
+    assert done, "idle notification must complete"
+    assert calls == 1, "callback must fire exactly once per notification"
+    assert stub._idle_state_callbacks == [reregistering], (
+        "re-registration must be deferred to the next idle notification"
+    )
 
 
 def test_reload_target_sleeps_at_level_2():
