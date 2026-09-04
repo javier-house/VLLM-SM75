@@ -72,12 +72,34 @@ git clone https://github.com/fishensw/VLLM-SM75.git
 cd VLLM-SM75
 ```
 
-### 2. 构建镜像
+### 2. 准备基础镜像
 
-准备兼容 vLLM 0.28.0、CUDA 12.9、PyTorch 2.13.0 和 SM75 的基础镜像：
+构建依赖定制 SM75 基础镜像：vLLM 0.28.0、CUDA 12.9、PyTorch 2.13.0，
+FlashInfer 从官方基线的 0.6.16.post3 升级到 0.6.18 并移除
+`flashinfer-jit-cache`（构建时的合同检查会验证这些版本，用官方镜像直接
+构建会在 verify 步失败）。已有构建好的 `-sm75` 基础镜像可跳过本节；
+否则从官方镜像 `vllm/vllm-openai:v0.28.0-cu129` 出发：
+
+```dockerfile
+# Dockerfile.sm75-base
+FROM vllm/vllm-openai:v0.28.0-cu129
+
+RUN uv pip install --system --no-cache \
+      --extra-index-url https://flashinfer.ai/whl/ \
+      "flashinfer-python==0.6.18" "flashinfer-cubin==0.6.18" \
+    && (uv pip uninstall --system flashinfer-jit-cache || true)
+```
 
 ```bash
-export BASE_IMAGE='your-registry.example/vllm-openai:v0.28.0-cu129-sm75'
+mkdir -p /tmp/sm75-base
+# 将上面的 Dockerfile.sm75-base 保存为 /tmp/sm75-base/Dockerfile
+docker build -t local/vllm-openai:v0.28.0-cu129-sm75 /tmp/sm75-base
+```
+
+### 3. 构建镜像
+
+```bash
+export BASE_IMAGE='local/vllm-openai:v0.28.0-cu129-sm75'
 
 docker build \
   --file docker/Dockerfile.vllm-sm75-v0.1.0 \
@@ -92,7 +114,7 @@ docker build \
 Dockerfile 会编译 SM75 扩展、检查 `cuobjdump` 架构、验证 `runtime` 版本，并在
 构建阶段运行必要的 backend selector tests。
 
-### 3. 启动服务
+### 4. 启动服务
 
 ```bash
 export VLLM_API_KEY='replace-with-your-api-key'
