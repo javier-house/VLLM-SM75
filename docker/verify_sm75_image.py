@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.metadata
 import json
 import tempfile
@@ -82,23 +83,48 @@ def main() -> None:
                 "page-cache warm on an empty dir must advise 0 files"
             )
 
-    # Deep-sleep exit plumbing on the engine-core proc.
-    from vllm.v1.engine.core import EngineCoreProc
+    # Deep-sleep exit/respawn plumbing (engine-core proc + client side).
+    # Checked statically with ast against the installed source copy instead
+    # of importing vllm.v1.engine.{core,core_client,async_llm}: those
+    # imports pull in the whole engine stack (executor, model executor,
+    # attention backends) and add several GiB of peak memory to the build,
+    # on top of the parallel nvcc stage.
+    engine_source = Path("/opt/vllm-sm75/source/v0.1.0/vllm/v1/engine")
 
-    if EngineCoreProc.DEEP_SLEEP_EXITING != b"DEEP_SLEEP_EXITING":
+    def _class_members(path: Path) -> dict[str, set[str]]:
+        tree = ast.parse(path.read_text(), filename=str(path))
+        classes: dict[str, set[str]] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            members: set[str] = set()
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    members.add(item.name)
+                elif isinstance(item, ast.Assign):
+                    members.update(
+                        target.id
+                        for target in item.targets
+                        if isinstance(target, ast.Name)
+                    )
+            classes[node.name] = members
+        return classes
+
+    core_classes = _class_members(engine_source / "core.py")
+    core_members = core_classes.get("EngineCoreProc", set())
+    if "DEEP_SLEEP_EXITING" not in core_members:
         raise RuntimeError("EngineCoreProc must define DEEP_SLEEP_EXITING")
-    if not hasattr(EngineCoreProc, "request_deep_sleep_exit"):
+    if "request_deep_sleep_exit" not in core_members:
         raise RuntimeError("EngineCoreProc must define request_deep_sleep_exit")
 
-    # Deep-sleep respawn plumbing on the client side.
-    from vllm.v1.engine.async_llm import AsyncLLM
-    from vllm.v1.engine.core_client import AsyncMPClient, MPClient
-
-    if not hasattr(MPClient, "_respawn_launch"):
+    client_classes = _class_members(engine_source / "core_client.py")
+    if "_respawn_launch" not in client_classes.get("MPClient", set()):
         raise RuntimeError("MPClient must define _respawn_launch")
-    if not hasattr(AsyncMPClient, "respawn_engine"):
+    if "respawn_engine" not in client_classes.get("AsyncMPClient", set()):
         raise RuntimeError("AsyncMPClient must define respawn_engine")
-    if not hasattr(AsyncLLM, "_await_deep_sleep_respawn"):
+
+    async_llm_classes = _class_members(engine_source / "async_llm.py")
+    if "_await_deep_sleep_respawn" not in async_llm_classes.get("AsyncLLM", set()):
         raise RuntimeError("AsyncLLM must define _await_deep_sleep_respawn")
 
     result = {

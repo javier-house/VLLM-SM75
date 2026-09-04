@@ -22,6 +22,16 @@ FROM ${BASE_IMAGE} AS runtime
 # flashinfer-jit-cache 0.6.18 contains AOT cubins without an SM75 image and
 # makes BatchPrefillWithPagedKVCache fail during CUDA graph warmup.
 
+# These COPY --from layers are placed first on purpose: they make the
+# runtime stage depend on the finished flashqla-builder stage, so BuildKit
+# serializes the nvcc compile before the install/verify steps instead of
+# running them in parallel.  Running both at once peaks at nvcc + a full
+# vllm import simultaneously and OOMs low-memory build hosts (16 GiB).
+COPY --from=flashqla-builder /opt/flashqla-build/flash_qla_sm75_gdn.so \
+    /opt/vllm-sm75/extensions/flash_qla_sm75_gdn.so
+COPY --from=flashqla-builder /opt/flashqla-build/cuobjdump.txt \
+    /opt/vllm-sm75/evidence/cuobjdump.txt
+
 ARG BUILD_DATE
 ARG SOURCE_REVISION
 ARG BASE_IMAGE_ID
@@ -90,11 +100,6 @@ COPY tests/config/test_model_dtype_override.py \
     /opt/vllm-sm75/source/v0.1.0/tests/config/test_model_dtype_override.py
 COPY tests/v1/engine/test_auto_sleep.py \
     /opt/vllm-sm75/source/v0.1.0/tests/v1/engine/test_auto_sleep.py
-
-COPY --from=flashqla-builder /opt/flashqla-build/flash_qla_sm75_gdn.so \
-    /opt/vllm-sm75/extensions/flash_qla_sm75_gdn.so
-COPY --from=flashqla-builder /opt/flashqla-build/cuobjdump.txt \
-    /opt/vllm-sm75/evidence/cuobjdump.txt
 
 ENV FLASH_QLA_SM75_PREBUILT_EXTENSION_PATH=/opt/vllm-sm75/extensions/flash_qla_sm75_gdn.so \
     FLASH_QLA_SM75_ALLOW_JIT=0 \
