@@ -307,14 +307,18 @@ def test_notify_idle_callbacks_terminates_with_reregistering_callback():
     the engine sat idle with one CPU core pegged and the API server never
     became ready.  The snapshot-based implementation must return after one
     pass and defer the re-registration to the next idle notification.
+
+    Note: the method lives on EngineCoreProc (the process engine the API
+    server runs), not on the in-process EngineCore base class, which only
+    declares the _idle_state_callbacks attribute.
     """
     try:
-        from vllm.v1.engine.core import EngineCore
+        from vllm.v1.engine.core import EngineCoreProc
     except ImportError:
         print("  skipped: vllm not importable in this environment")
         return
 
-    notify = EngineCore._notify_idle_state_callbacks  # plain function
+    notify = EngineCoreProc._notify_idle_state_callbacks  # plain function
 
     class _Stub:
         def __init__(self) -> None:
